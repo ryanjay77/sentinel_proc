@@ -20,12 +20,12 @@ class SecurityHeaders
         $headers->set('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
 
         // The app renders inline <script> blocks (dashboard, alert detail) and inline
-        // confirm() handlers, and pulls Tailwind from its CDN, so 'unsafe-inline' and the
-        // CDN hosts are required to avoid breaking the UI. frame-ancestors 'none' still
-        // blocks clickjacking regardless of X-Frame-Options support.
+        // confirm() handlers, and pulls Tailwind and Chart.js from their CDNs, so
+        // 'unsafe-inline' and the CDN hosts are required to avoid breaking the UI.
+        // frame-ancestors 'none' still blocks clickjacking regardless of X-Frame-Options support.
         $csp = implode('; ', [
             "default-src 'self'",
-            "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com",
+            "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net",
             "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://fonts.bunny.net",
             "font-src 'self' https://fonts.bunny.net data:",
             "img-src 'self' data:",

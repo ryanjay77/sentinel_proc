@@ -8,6 +8,9 @@ import psutil
 import requests
 from datetime import datetime, timezone
 
+import agent_config
+from cpu_sampling import sample_processes
+
 # ── Optional MySQL driver ─────────────────────────────────────────────
 try:
     import mysql.connector
@@ -18,20 +21,17 @@ except ImportError:
 # ── Paths & config ────────────────────────────────────────────────────
 OUTPUT_PATH = os.path.join(os.path.dirname(__file__), 'live_snapshot.json')
 
-DB_CONFIG = {
-    'host':     os.getenv('SENTINEL_DB_HOST',     '127.0.0.1'),
-    'port':     int(os.getenv('SENTINEL_DB_PORT', '3306')),
-    'user':     os.getenv('SENTINEL_DB_USER',     'sentinel_user'),
-    'password': os.getenv('SENTINEL_DB_PASSWORD', 'sentinel_pass'),
-    'database': os.getenv('SENTINEL_DB_NAME',     'sentinel_proc'),
-}
+DB_CONFIG = agent_config.db_config()
 
-# VirusTotal — read from env only; never hardcode keys in source
-VT_API_KEY           = os.getenv('VT_API_KEY', '')
+# VirusTotal — never hardcoded; set VT_API_KEY in the environment or agent .env
+VT_API_KEY           = agent_config.vt_api_key()
 VT_URL               = 'https://www.virustotal.com/api/v3/files/{}'
 VT_RATE_LIMIT_SECS   = 16   # free tier: 4 req/min
 
-SUSPICIOUS_KEYWORDS = {'temp', 'tmp', 'downloads', 'appdata/local/temp'}
+# Compared against whole path segments, so a folder named "templates" or
+# "attempts" is not mistaken for a Temp directory the way a substring
+# search would read it.
+SUSPICIOUS_KEYWORDS = {'temp', 'tmp', 'downloads'}
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -181,6 +181,9 @@ def db_connect():
     if not _MYSQL_AVAILABLE:
         return None
     if not should_use_mysql():
+        print('[DB] No database configured — set SENTINEL_DB_USER and '
+              'SENTINEL_DB_PASSWORD, or create monitoring_agent/.env '
+              '(see .env.example). Continuing with JSON output only.')
         return None
     try:
         return mysql.connector.connect(**DB_CONFIG)
@@ -372,7 +375,7 @@ def collect_snapshot():
     # Load whitelist/blacklist once at scan start
     process_lists = load_process_lists(conn)
 
-    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cpu_percent', 'memory_info']):
+    for proc in sample_processes(['pid', 'name', 'exe', 'cpu_percent', 'memory_info']):
         try:
             info      = proc.info
             pid       = info['pid']

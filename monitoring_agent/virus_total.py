@@ -1,7 +1,6 @@
 
 
 import json
-import os
 import psutil
 import hashlib
 import platform
@@ -10,20 +9,17 @@ import requests
 import mysql.connector
 from mysql.connector import Error
 
-# ---------------------------------------------------------------------
-# Configuration - fill in your own values or set environment variables.
-# Defaults match monitoring_agent/live_monitor.py and sentinel_proc-web/.env
-# so both agents write to the same database.
-# ---------------------------------------------------------------------
-DB_CONFIG = {
-    "host": os.getenv("SENTINEL_DB_HOST", "127.0.0.1"),
-    "user": os.getenv("SENTINEL_DB_USER", "sentinel_user"),
-    "password": os.getenv("SENTINEL_DB_PASSWORD", "sentinel_pass"),
-    "database": os.getenv("SENTINEL_DB_NAME", "sentinel_proc"),
-    "port": int(os.getenv("SENTINEL_DB_PORT", "3306")),
-}
+import agent_config
+from cpu_sampling import sample_processes
 
-VT_API_KEY = os.getenv("VT_API_KEY", "")  
+# ---------------------------------------------------------------------
+# Configuration - credentials come from the environment or the gitignored
+# monitoring_agent/.env (see .env.example), shared with live_monitor.py so
+# both agents write to the same database.
+# ---------------------------------------------------------------------
+DB_CONFIG = agent_config.db_config()
+
+VT_API_KEY = agent_config.vt_api_key()
 VT_URL = "https://www.virustotal.com/api/v3/files/{hash}"
 
 VT_SECONDS_BETWEEN_REQUESTS = 16
@@ -39,6 +35,11 @@ SUSPICIOUS_PATH_KEYWORDS = ["temp", "tmp", "downloads"]
 
 
 def get_connection():
+    if not DB_CONFIG.get('user'):
+        raise Error(
+            'No database configured — set SENTINEL_DB_USER and SENTINEL_DB_PASSWORD, '
+            'or create monitoring_agent/.env (see .env.example).'
+        )
     return mysql.connector.connect(**DB_CONFIG)
 
 def check_virustotal(file_hash):
@@ -261,7 +262,7 @@ def scan_processes():
         conn.close()
         return
 
-    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cpu_percent', 'cmdline']):
+    for proc in sample_processes(['pid', 'name', 'exe', 'cpu_percent', 'cmdline']):
         try:
             info = proc.info
             pid = info['pid']

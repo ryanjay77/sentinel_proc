@@ -7,6 +7,8 @@ import os
 import platform
 import time
 
+from cpu_sampling import sample_processes
+
 SEEN_HASHES_FILE = "seen_hashes.json"
 
 POINTS_FIRST_SEEN = 25
@@ -16,7 +18,12 @@ POINTS_UNSIGNED = 30
 
 CPU_THRESHOLD = 50.0  # percent
 
-SUSPICIOUS_PATH_KEYWORDS = ["temp", "tmp", "downloads", "appdata\\local\\temp"]
+SUSPICIOUS_PATH_KEYWORDS = {"temp", "tmp", "downloads"}
+
+
+def _path_segments(path_text):
+    normalized = (path_text or "").lower().replace("\\", "/")
+    return [seg for seg in normalized.split("/") if seg]
 
 def load_seen_hashes():
     if os.path.exists(SEEN_HASHES_FILE):
@@ -39,15 +46,20 @@ def hash_file(filepath):
         return None
 
 def is_suspicious_path(filepath, cmdline=None):
+    """True when the executable path or any command-line argument names a
+    staging folder (Temp, tmp, Downloads).
 
-    lowered = filepath.lower()
-    if any(keyword in lowered for keyword in SUSPICIOUS_PATH_KEYWORDS):
+    Keywords are compared against whole path segments, matching live_monitor.py
+    and virus_total.py, so a folder called "templates" or "attempts" is not
+    mistaken for a Temp directory.
+    """
+    if any(keyword in _path_segments(filepath) for keyword in SUSPICIOUS_PATH_KEYWORDS):
         return True
 
     if cmdline:
-        cmdline_text = " ".join(cmdline).lower()
-        if any(keyword in cmdline_text for keyword in SUSPICIOUS_PATH_KEYWORDS):
-            return True
+        for arg in cmdline:
+            if any(keyword in _path_segments(arg) for keyword in SUSPICIOUS_PATH_KEYWORDS):
+                return True
 
     return False
 
@@ -113,7 +125,7 @@ def scan_processes():
     print(f"{'PID':<8}{'NAME':<22}{'SCORE':<8}{'LEVEL':<8}{'REASONS'}")
     print("-" * 100)
 
-    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cpu_percent', 'cmdline']):
+    for proc in sample_processes(['pid', 'name', 'exe', 'cpu_percent', 'cmdline']):
         try:
             info = proc.info
             pid = info['pid']

@@ -30,6 +30,64 @@
         @endforeach
     </div>
 
+    <div class="mb-8 grid grid-cols-2 gap-6">
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+            <div class="mb-4 flex items-center justify-between">
+                <h2 class="text-xl font-semibold">Process Inventory by Risk</h2>
+                <span class="text-xs text-slate-400">{{ array_sum($analytics['riskLevels']['values']) }} tracked</span>
+            </div>
+            @if (array_sum($analytics['riskLevels']['values']) > 0)
+                <div class="relative h-64">
+                    <canvas id="riskLevelChart"></canvas>
+                </div>
+            @else
+                <div class="flex h-64 items-center justify-center text-sm text-slate-500">No process data yet.</div>
+            @endif
+        </div>
+
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+            <div class="mb-4 flex items-center justify-between">
+                <h2 class="text-xl font-semibold">Alert Log by Severity</h2>
+                <span class="text-xs text-slate-400">{{ array_sum($analytics['severities']['values']) }} alerts</span>
+            </div>
+            @if (array_sum($analytics['severities']['values']) > 0)
+                <div class="relative h-64">
+                    <canvas id="alertSeverityChart"></canvas>
+                </div>
+            @else
+                <div class="flex h-64 items-center justify-center text-sm text-slate-500">No alert data yet.</div>
+            @endif
+        </div>
+
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+            <div class="mb-4 flex items-center justify-between">
+                <h2 class="text-xl font-semibold">New Processes Discovered per Day</h2>
+                <span class="text-xs text-slate-400">Last {{ count($analytics['discoveries']['labels']) }} active days</span>
+            </div>
+            @if (count($analytics['discoveries']['values']) > 0)
+                <div class="relative h-64">
+                    <canvas id="discoveriesChart"></canvas>
+                </div>
+            @else
+                <div class="flex h-64 items-center justify-center text-sm text-slate-500">No discovery history yet.</div>
+            @endif
+        </div>
+
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+            <div class="mb-4 flex items-center justify-between">
+                <h2 class="text-xl font-semibold">Top 5 Memory Consumers</h2>
+                <span class="text-xs text-slate-400">Latest scan</span>
+            </div>
+            @if (count($analytics['consumers']['values']) > 0)
+                <div class="relative h-64">
+                    <canvas id="memoryConsumersChart"></canvas>
+                </div>
+            @else
+                <div class="flex h-64 items-center justify-center text-sm text-slate-500">No process data yet.</div>
+            @endif
+        </div>
+    </div>
+
     <div class="grid grid-cols-3 gap-6">
         <div class="col-span-2 rounded-xl border border-slate-800 bg-slate-900 p-5">
             <div class="mb-4 flex items-center justify-between">
@@ -90,6 +148,124 @@
 @endsection
 
 @push('scripts')
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            if (typeof Chart === 'undefined') return;
+
+            const analytics = @json($analytics, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+            const tickColor = '#94a3b8';
+            const gridColor = 'rgba(148, 163, 184, 0.15)';
+            const legendLabels = { color: '#cbd5e1', padding: 14, boxWidth: 12 };
+
+            const riskCanvas = document.getElementById('riskLevelChart');
+            if (riskCanvas) {
+                new Chart(riskCanvas, {
+                    type: 'doughnut',
+                    data: {
+                        labels: analytics.riskLevels.labels,
+                        datasets: [{
+                            data: analytics.riskLevels.values,
+                            backgroundColor: ['#ef4444', '#f59e0b', '#10b981'],
+                            borderColor: '#0f172a',
+                            borderWidth: 2
+                        }]
+                    },
+                    options: {
+                        maintainAspectRatio: false,
+                        cutout: '62%',
+                        plugins: { legend: { position: 'bottom', labels: legendLabels } }
+                    }
+                });
+            }
+
+            const severityCanvas = document.getElementById('alertSeverityChart');
+            if (severityCanvas) {
+                new Chart(severityCanvas, {
+                    type: 'doughnut',
+                    data: {
+                        labels: analytics.severities.labels,
+                        datasets: [{
+                            data: analytics.severities.values,
+                            backgroundColor: ['#dc2626', '#ef4444', '#f59e0b', '#22d3ee'],
+                            borderColor: '#0f172a',
+                            borderWidth: 2
+                        }]
+                    },
+                    options: {
+                        maintainAspectRatio: false,
+                        cutout: '62%',
+                        plugins: { legend: { position: 'bottom', labels: legendLabels } }
+                    }
+                });
+            }
+
+            const discoveriesCanvas = document.getElementById('discoveriesChart');
+            if (discoveriesCanvas) {
+                new Chart(discoveriesCanvas, {
+                    type: 'bar',
+                    data: {
+                        labels: analytics.discoveries.labels,
+                        datasets: [{
+                            label: 'New hashes',
+                            data: analytics.discoveries.values,
+                            backgroundColor: '#22d3ee',
+                            borderRadius: 4
+                        }]
+                    },
+                    options: {
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { ticks: { color: tickColor }, grid: { display: false } },
+                            y: {
+                                beginAtZero: true,
+                                ticks: { color: tickColor, precision: 0 },
+                                grid: { color: gridColor }
+                            }
+                        }
+                    }
+                });
+            }
+
+            const memoryCanvas = document.getElementById('memoryConsumersChart');
+            if (memoryCanvas) {
+                new Chart(memoryCanvas, {
+                    type: 'bar',
+                    data: {
+                        labels: analytics.consumers.labels,
+                        datasets: [{
+                            label: 'Memory (MB)',
+                            data: analytics.consumers.values,
+                            backgroundColor: '#a78bfa',
+                            borderRadius: 4
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    label: (context) => context.parsed.x + ' MB'
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                beginAtZero: true,
+                                ticks: { color: tickColor },
+                                grid: { color: gridColor }
+                            },
+                            y: { ticks: { color: tickColor }, grid: { display: false } }
+                        }
+                    }
+                });
+            }
+        });
+    </script>
+
     @if (auth()->user()->canRefresh())
         <script>
             document.addEventListener('DOMContentLoaded', function () {

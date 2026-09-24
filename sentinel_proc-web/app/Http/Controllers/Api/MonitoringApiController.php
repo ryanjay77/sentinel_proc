@@ -8,6 +8,7 @@ use App\Models\MonitoringSnapshot;
 use App\Models\Process;
 use App\Models\Alert;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
 class MonitoringApiController extends Controller
@@ -69,53 +70,59 @@ class MonitoringApiController extends Controller
                 ], 422);
             }
 
-            // Create the monitoring snapshot
-            $snapshot = MonitoringSnapshot::create([
-                'snapshot' => $validated['snapshot'],
-                'snapshot_timestamp' => $validated['snapshot_timestamp'] ?? now(),
-                'process_count' => $validated['process_count'] ?? null,
-                'cpu_usage' => $validated['cpu_usage'] ?? null,
-                'memory_usage' => $validated['memory_usage'] ?? null,
-                'disk_usage' => $validated['disk_usage'] ?? null,
-                'status' => $validated['status'] ?? 'normal',
-                'processes' => $snapshotData['processes'] ?? null,
-                'alerts' => $snapshotData['alerts'] ?? null,
-                'risk_score' => $snapshotData['risk_score'] ?? null,
-            ]);
+            // The snapshot and its child rows are one logical unit: a failure
+            // part-way through (e.g. an over-long value rejected by the column)
+            // must not leave a snapshot with missing processes or alerts.
+            $snapshot = DB::transaction(function () use ($validated, $snapshotData) {
+                $snapshot = MonitoringSnapshot::create([
+                    'snapshot' => $validated['snapshot'],
+                    'snapshot_timestamp' => $validated['snapshot_timestamp'] ?? now(),
+                    'process_count' => $validated['process_count'] ?? null,
+                    'cpu_usage' => $validated['cpu_usage'] ?? null,
+                    'memory_usage' => $validated['memory_usage'] ?? null,
+                    'disk_usage' => $validated['disk_usage'] ?? null,
+                    'status' => $validated['status'] ?? 'normal',
+                    'processes' => $snapshotData['processes'] ?? null,
+                    'alerts' => $snapshotData['alerts'] ?? null,
+                    'risk_score' => $snapshotData['risk_score'] ?? null,
+                ]);
 
-            // Process individual process data if provided
-            if (!empty($snapshotData['processes']) && is_array($snapshotData['processes'])) {
-                foreach ($snapshotData['processes'] as $processData) {
-                    Process::create([
-                        'monitoring_snapshot_id' => $snapshot->id,
-                        'pid' => $processData['pid'] ?? null,
-                        'name' => $processData['name'] ?? 'Unknown',
-                        'path' => $processData['path'] ?? null,
-                        'cpu_percent' => $processData['cpu_percent'] ?? null,
-                        'memory_mb' => $processData['memory_mb'] ?? null,
-                        'status' => $processData['status'] ?? null,
-                        'hash' => $processData['hash'] ?? null,
-                        'first_seen' => $processData['first_seen'] ?? null,
-                        'risk_level' => $processData['risk_level'] ?? 'low',
-                        'virus_total_data' => $processData['virus_total_data'] ?? null,
-                    ]);
+                // Process individual process data if provided
+                if (!empty($snapshotData['processes']) && is_array($snapshotData['processes'])) {
+                    foreach ($snapshotData['processes'] as $processData) {
+                        Process::create([
+                            'monitoring_snapshot_id' => $snapshot->id,
+                            'pid' => $processData['pid'] ?? null,
+                            'name' => $processData['name'] ?? 'Unknown',
+                            'path' => $processData['path'] ?? null,
+                            'cpu_percent' => $processData['cpu_percent'] ?? null,
+                            'memory_mb' => $processData['memory_mb'] ?? null,
+                            'status' => $processData['status'] ?? null,
+                            'hash' => $processData['hash'] ?? null,
+                            'first_seen' => $processData['first_seen'] ?? null,
+                            'risk_level' => $processData['risk_level'] ?? 'low',
+                            'virus_total_data' => $processData['virus_total_data'] ?? null,
+                        ]);
+                    }
                 }
-            }
 
-            // Process individual alert data if provided
-            if (!empty($snapshotData['alerts']) && is_array($snapshotData['alerts'])) {
-                foreach ($snapshotData['alerts'] as $alertData) {
-                    Alert::create([
-                        'monitoring_snapshot_id' => $snapshot->id,
-                        'process_id' => $alertData['process_id'] ?? null,
-                        'alert_type' => $alertData['alert_type'] ?? 'unknown',
-                        'severity' => $alertData['severity'] ?? 'low',
-                        'message' => $alertData['message'] ?? '',
-                        'details' => $alertData['details'] ?? null,
-                        'acknowledged' => false,
-                    ]);
+                // Process individual alert data if provided
+                if (!empty($snapshotData['alerts']) && is_array($snapshotData['alerts'])) {
+                    foreach ($snapshotData['alerts'] as $alertData) {
+                        Alert::create([
+                            'monitoring_snapshot_id' => $snapshot->id,
+                            'process_id' => $alertData['process_id'] ?? null,
+                            'alert_type' => $alertData['alert_type'] ?? 'unknown',
+                            'severity' => $alertData['severity'] ?? 'low',
+                            'message' => $alertData['message'] ?? '',
+                            'details' => $alertData['details'] ?? null,
+                            'acknowledged' => false,
+                        ]);
+                    }
                 }
-            }
+
+                return $snapshot;
+            });
 
             return response()->json([
                 'ok' => true,

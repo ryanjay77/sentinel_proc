@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     details                JSON            NULL,
     acknowledged           TINYINT(1)      NOT NULL DEFAULT 0,
     created_at             TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at             TIMESTAMP       NULL DEFAULT NULL,
     PRIMARY KEY (id),
     KEY alerts_monitoring_snapshot_id_index (monitoring_snapshot_id),
     KEY alerts_process_id_index (process_id),

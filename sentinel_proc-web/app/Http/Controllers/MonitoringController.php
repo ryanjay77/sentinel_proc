@@ -2,8 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\DashboardAnalyticsService;
 use App\Services\LiveSnapshotService;
-use Illuminate\Http\Request;
 
 class MonitoringController extends Controller
 {
@@ -30,7 +30,7 @@ class MonitoringController extends Controller
     /**
      * Show the dashboard
      */
-    public function index(LiveSnapshotService $snapshots)
+    public function index(LiveSnapshotService $snapshots, DashboardAnalyticsService $analytics)
     {
         $snapshot = $snapshots->load();
 
@@ -39,6 +39,7 @@ class MonitoringController extends Controller
             'processes' => $snapshot['processes'] ?? self::DEFAULT_PROCESSES,
             'alerts' => $snapshot['alerts'] ?? self::DEFAULT_ALERTS,
             'generatedAt' => $snapshot['generated_at'] ?? null,
+            'analytics' => $analytics->summary(),
         ]);
     }
 
@@ -49,6 +50,18 @@ class MonitoringController extends Controller
      */
     public function refresh()
     {
+        // Never launch the real agent from the test suite. It writes a full
+        // snapshot into the live database and overwrites live_snapshot.json, so
+        // running the tests would pollute (and, with a VirusTotal key set, spend
+        // quota on) the very data being demonstrated. The authorization decision
+        // a test is checking happens before this point, so skipping is enough.
+        if (app()->runningUnitTests()) {
+            return response()->json([
+                'ok'      => true,
+                'message' => 'Scan skipped in the test environment.',
+            ]);
+        }
+
         $script = base_path('../monitoring_agent/live_monitor.py');
 
         if (!file_exists($script)) {
