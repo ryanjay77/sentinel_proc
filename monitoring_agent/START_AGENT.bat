@@ -4,6 +4,9 @@ REM Double-click this file to start monitoring.
 
 setlocal
 
+REM Change to the directory where this batch file lives
+cd /d "%~dp0"
+
 REM ── 1. Check Python is installed ──────────────────────────────────────────
 python --version >nul 2>&1
 if errorlevel 1 (
