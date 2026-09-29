@@ -1,0 +1,5 @@
+{
+  "builder": "nixpacks",
+  "buildCommand": "cd sentinel_proc-web && composer install --no-dev --optimize-autoloader",
+  "startCommand": "cd sentinel_proc-web && php artisan serve --host=0.0.0.0 --port=$PORT"
+}
