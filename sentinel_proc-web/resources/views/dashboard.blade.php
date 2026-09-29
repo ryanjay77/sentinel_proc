@@ -359,5 +359,18 @@
                 });
             });
         </script>
+        <script>
+    /*
+     * SentinelProc live monitoring refresh.
+     *
+     * The remote agent uploads a new snapshot approximately every
+     * 30 seconds. Refreshing every 10 seconds allows the dashboard
+     * to pick up newly uploaded process data without requiring the
+     * administrator to manually press Refresh.
+     */
+    setInterval(function () {
+        window.location.reload();
+    }, 10000);
+</script>
     @endif
 @endpush
