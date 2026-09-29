@@ -3,12 +3,16 @@ import json
 import os
 import hashlib
 import platform
+import socket
 import time
+import uuid
 import psutil
 import requests
 from datetime import datetime, timezone
 
 import agent_config
+from alert_popup import notify_risky_processes
+from api_client import ApiClient, ApiError
 from cpu_sampling import sample_processes
 
 # ── Optional MySQL driver ─────────────────────────────────────────────
@@ -21,7 +25,15 @@ except ImportError:
 # ── Paths & config ────────────────────────────────────────────────────
 OUTPUT_PATH = os.path.join(os.path.dirname(__file__), 'live_snapshot.json')
 
+# 'local' (default): write straight to MySQL. 'api': remote-laptop mode —
+# everything goes over the authenticated HTTPS API instead.
+TRANSPORT = agent_config.transport()
+
 DB_CONFIG = agent_config.db_config()
+
+# Which laptop this scan came from. Stored with every scan so the dashboard
+# can show and filter data per machine.
+HOSTNAME = socket.gethostname()
 
 # VirusTotal — never hardcoded; set VT_API_KEY in the environment or agent .env
 VT_API_KEY           = agent_config.vt_api_key()
@@ -169,7 +181,12 @@ def should_use_mysql() -> bool:
     import) so callers and tests can patch live_monitor.DB_CONFIG.
     Password is deliberately not required, since a local MySQL account
     may legitimately have an empty password.
+
+    API mode overrides everything: telemetry goes over HTTPS only, even
+    when database credentials happen to be present on this machine.
     """
+    if TRANSPORT == 'api':
+        return False
     return bool(
         DB_CONFIG.get('host')
         and DB_CONFIG.get('user')
@@ -224,7 +241,7 @@ def update_vt_cache(conn, file_hash: str, vt: dict):
     cur.close()
 
 
-def insert_snapshot(conn, snapshot_json: str, process_count: int) -> int:
+def insert_snapshot(conn, snapshot_json: str, process_count: int, hostname: str = None) -> int:
     """
     Insert a row into monitoring_snapshots.
     Returns the new row's id (int).
@@ -232,9 +249,9 @@ def insert_snapshot(conn, snapshot_json: str, process_count: int) -> int:
     cur = conn.cursor()
     cur.execute(
         '''INSERT INTO monitoring_snapshots
-               (snapshot, snapshot_timestamp, process_count, status)
-           VALUES (%s, NOW(), %s, 'normal')''',
-        (snapshot_json, process_count),
+               (snapshot, snapshot_timestamp, process_count, status, hostname)
+           VALUES (%s, NOW(), %s, 'normal', %s)''',
+        (snapshot_json, process_count, hostname),
     )
     conn.commit()
     snapshot_id = cur.lastrowid
@@ -242,7 +259,7 @@ def insert_snapshot(conn, snapshot_json: str, process_count: int) -> int:
     return snapshot_id
 
 
-def insert_process(conn, snapshot_id: int, p: dict) -> int:
+def insert_process(conn, snapshot_id: int, p: dict, hostname: str = None) -> int:
     """
     Insert one process row. Returns the new process id.
 
@@ -250,6 +267,7 @@ def insert_process(conn, snapshot_id: int, p: dict) -> int:
       monitoring_snapshot_id  ← snapshot_id (int)
       pid                     ← p['pid']
       name                    ← p['name']
+      hostname                ← hostname (laptop that produced the scan)
       path                    ← p['path']
       cpu_percent             ← p['cpu_percent']
       memory_mb               ← p['memory_mb']
@@ -263,14 +281,15 @@ def insert_process(conn, snapshot_id: int, p: dict) -> int:
     cur = conn.cursor()
     cur.execute(
         '''INSERT INTO processes
-               (monitoring_snapshot_id, pid, name, path,
+               (monitoring_snapshot_id, pid, name, hostname, path,
                 cpu_percent, memory_mb, status, hash,
                 first_seen, risk_level, virus_total_data)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''',
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''',
         (
             snapshot_id,
             p['pid'],
             p['name'],
+            hostname,
             p.get('path') or None,
             p.get('cpu_percent'),
             p.get('memory_mb'),
@@ -333,13 +352,15 @@ def insert_activity_log(conn, snapshot_id: int, p: dict, reasons: list):
     cur.close()
 
 
-def insert_alert(conn, snapshot_id: int, process_id: int, p: dict, reasons: list):
+def insert_alert(conn, snapshot_id: int, process_id: int, p: dict, reasons: list,
+                 hostname: str = None):
     """
     Insert one alert row for a medium/high risk process.
 
     Column mapping:
       monitoring_snapshot_id ← snapshot_id
       process_id             ← process_id (bigint)
+      hostname               ← hostname (laptop that produced the scan)
       alert_type             ← 'risk_score'
       severity               ← p['risk_level']  ('high'/'medium')
       message                ← human-readable string
@@ -356,10 +377,10 @@ def insert_alert(conn, snapshot_id: int, process_id: int, p: dict, reasons: list
     cur = conn.cursor()
     cur.execute(
         '''INSERT INTO alerts
-               (monitoring_snapshot_id, process_id, alert_type,
+               (monitoring_snapshot_id, process_id, hostname, alert_type,
                 severity, message, details, acknowledged)
-           VALUES (%s, %s, 'risk_score', %s, %s, %s, 0)''',
-        (snapshot_id, process_id, p['risk_level'], message, details),
+           VALUES (%s, %s, %s, 'risk_score', %s, %s, %s, 0)''',
+        (snapshot_id, process_id, hostname, p['risk_level'], message, details),
     )
     conn.commit()
     cur.close()
@@ -367,7 +388,74 @@ def insert_alert(conn, snapshot_id: int, process_id: int, p: dict, reasons: list
 
 # ── Core collection ───────────────────────────────────────────────────
 
+def build_snapshot(raw_processes):
+    """
+    Assemble the dashboard-facing snapshot dict from scored processes.
+
+    Shared by the local MySQL path and the API path so the JSON shape
+    (stats / processes / alerts / generated_at) stays identical.
+    """
+    total      = len(raw_processes)
+    high_count = sum(1 for p in raw_processes if p['risk_level'] == 'high')
+    med_count  = sum(1 for p in raw_processes if p['risk_level'] == 'medium')
+    norm_count = sum(1 for p in raw_processes if p['risk_level'] == 'low')
+
+    # Sort: high first, then medium, then by CPU desc; cap at 8 for dashboard
+    sorted_procs = sorted(
+        raw_processes,
+        key=lambda p: ({'high': 0, 'medium': 1, 'low': 2}[p['risk_level']], -p['cpu_percent']),
+    )
+
+    # Dashboard-friendly process list (top 8)
+    dashboard_processes = [
+        {
+            'pid':    p['pid'],
+            'name':   p['name'],
+            'user':   p['user'],
+            'cpu':    f"{p['cpu_percent']:.1f}%",
+            'memory': f"{p['memory_mb']:.0f} MB",
+            'status': {'high': 'High Risk', 'medium': 'Medium Risk', 'low': 'Normal'}[p['risk_level']],
+        }
+        for p in sorted_procs[:8]
+    ]
+
+    # Dashboard alerts (medium + high, cap at 4)
+    alert_procs = [p for p in sorted_procs if p['risk_level'] in ('high', 'medium')]
+    dashboard_alerts = [
+        {
+            'severity': p['risk_level'].upper(),
+            'title':    f"{p['name']} triggered risk scoring rules",
+            'time':     'just now',
+            'source':   p['path'] or p['name'],
+        }
+        for p in alert_procs[:4]
+    ] or [{
+        'severity': 'LOW',
+        'title':    'No active anomalies detected',
+        'time':     'just now',
+        'source':   'System baseline',
+    }]
+
+    stats = [
+        {'label': 'Running Processes', 'value': str(total),      'trend': '',     'tone': 'primary'},
+        {'label': 'High Risk',          'value': str(high_count), 'trend': '',     'tone': 'danger'},
+        {'label': 'Medium Risk',        'value': str(med_count),  'trend': '',     'tone': 'warning'},
+        {'label': 'Whitelisted',        'value': str(norm_count), 'trend': '',     'tone': 'success'},
+    ]
+
+    return {
+        'stats':        stats,
+        'processes':    dashboard_processes,
+        'alerts':       dashboard_alerts,
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'hostname':     HOSTNAME,
+    }
+
+
 def collect_snapshot():
+    if TRANSPORT == 'api':
+        return collect_snapshot_api()
+
     conn = db_connect()
     vt_checks = 0
     raw_processes = []   # full data per process (for DB writes)
@@ -441,64 +529,10 @@ def collect_snapshot():
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
-    # ── Build summary stats ───────────────────────────────────────────
-    total      = len(raw_processes)
-    high_count = sum(1 for p in raw_processes if p['risk_level'] == 'high')
-    med_count  = sum(1 for p in raw_processes if p['risk_level'] == 'medium')
-    norm_count = sum(1 for p in raw_processes if p['risk_level'] == 'low')
+    notify_risky_processes(raw_processes)
 
-    # ── Build the JSON snapshot (for live_snapshot.json + monitoring_snapshots.snapshot) ──
-    # Sort: high first, then medium, then by CPU desc; cap at 8 for dashboard
-    sorted_procs = sorted(
-        raw_processes,
-        key=lambda p: ({'high': 0, 'medium': 1, 'low': 2}[p['risk_level']], -p['cpu_percent']),
-    )
-
-    # Dashboard-friendly process list (top 8)
-    dashboard_processes = [
-        {
-            'pid':    p['pid'],
-            'name':   p['name'],
-            'user':   p['user'],
-            'cpu':    f"{p['cpu_percent']:.1f}%",
-            'memory': f"{p['memory_mb']:.0f} MB",
-            'status': {'high': 'High Risk', 'medium': 'Medium Risk', 'low': 'Normal'}[p['risk_level']],
-        }
-        for p in sorted_procs[:8]
-    ]
-
-    # Dashboard alerts (medium + high, cap at 4)
-    alert_procs = [p for p in sorted_procs if p['risk_level'] in ('high', 'medium')]
-    dashboard_alerts = [
-        {
-            'severity': p['risk_level'].upper(),
-            'title':    f"{p['name']} triggered risk scoring rules",
-            'time':     'just now',
-            'source':   p['path'] or p['name'],
-        }
-        for p in alert_procs[:4]
-    ] or [{
-        'severity': 'LOW',
-        'title':    'No active anomalies detected',
-        'time':     'just now',
-        'source':   'System baseline',
-    }]
-
-    stats = [
-        {'label': 'Running Processes', 'value': str(total),      'trend': '',     'tone': 'primary'},
-        {'label': 'High Risk',          'value': str(high_count), 'trend': '',     'tone': 'danger'},
-        {'label': 'Medium Risk',        'value': str(med_count),  'trend': '',     'tone': 'warning'},
-        {'label': 'Whitelisted',        'value': str(norm_count), 'trend': '',     'tone': 'success'},
-    ]
-
-    generated_at = datetime.now(timezone.utc).isoformat()
-
-    snapshot = {
-        'stats':        stats,
-        'processes':    dashboard_processes,
-        'alerts':       dashboard_alerts,
-        'generated_at': generated_at,
-    }
+    # ── Build the JSON snapshot ────────────────────────────────────────
+    snapshot = build_snapshot(raw_processes)
 
     # ── Write live_snapshot.json (fallback) ───────────────────────────
     with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
@@ -507,13 +541,14 @@ def collect_snapshot():
     # ── Write to MySQL ────────────────────────────────────────────────
     if conn:
         try:
-            snapshot_id = insert_snapshot(conn, json.dumps(snapshot), total)
+            snapshot_id = insert_snapshot(conn, json.dumps(snapshot), len(raw_processes),
+                                          HOSTNAME)
 
             for p in raw_processes:
-                process_db_id = insert_process(conn, snapshot_id, p)
+                process_db_id = insert_process(conn, snapshot_id, p, HOSTNAME)
 
                 if p['risk_level'] in ('high', 'medium'):
-                    insert_alert(conn, snapshot_id, process_db_id, p, p['reasons'])
+                    insert_alert(conn, snapshot_id, process_db_id, p, p['reasons'], HOSTNAME)
 
                 insert_activity_log(conn, snapshot_id, p, p['reasons'])
 
@@ -525,22 +560,182 @@ def collect_snapshot():
     return snapshot
 
 
+def collect_snapshot_api(client=None):
+    """
+    API-only scan, used when SENTINEL_TRANSPORT=api (remote laptops).
+
+    Batching: every process is collected and hashed first, then ONE context
+    call fetches first-seen state, the VirusTotal cache and the allow/deny
+    lists, scoring runs locally, and ONE snapshot POST delivers everything.
+    MySQL is never contacted — no DB credentials needed on the laptop.
+    """
+    client = client or ApiClient()
+    raw_processes = []
+
+    # Phase 1 — collect process facts and hashes (no DB access yet)
+    for proc in sample_processes(['pid', 'name', 'exe', 'cpu_percent', 'memory_info']):
+        try:
+            info      = proc.info
+            path      = info.get('exe') or ''
+            mem_bytes = (info.get('memory_info').rss if info.get('memory_info') else 0)
+
+            try:
+                user = proc.username()
+            except Exception:
+                user = 'unknown'
+
+            raw_processes.append({
+                'pid':         info['pid'],
+                'name':        info['name'] or 'Unknown',
+                'path':        path,
+                'user':        user,
+                'cpu_percent': round(float(info.get('cpu_percent') or 0.0), 2),
+                'memory_mb':   round(mem_bytes / (1024 * 1024), 2),
+                'hash':        hash_file(path) if path else None,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    # Phase 2 — one context call for the whole scan
+    unique_hashes = sorted({p['hash'] for p in raw_processes if p['hash']})
+    if unique_hashes:
+        context = client.fetch_context(unique_hashes)
+    else:
+        context = {
+            'known_hashes': [],
+            'vt_cache': {},
+            'process_lists': {'whitelist': [], 'blacklist': []},
+        }
+
+    known_hashes  = set(context.get('known_hashes') or [])
+    vt_cache      = context.get('vt_cache') or {}
+    process_lists = context.get('process_lists') or {'whitelist': [], 'blacklist': []}
+
+    # Phase 3 — score locally with the server-provided context
+    for p in raw_processes:
+        file_hash  = p['hash']
+        first_seen = (not file_hash) or (file_hash not in known_hashes)
+
+        # API-only agents use server-provided VT results and never hold or use a VT key.
+        vt = vt_cache.get(file_hash) if first_seen and file_hash else None
+
+        unsigned = is_unsigned(p['path']) if p['path'] else None
+        score, risk_level, reasons = score_process(
+            p['path'], p['cpu_percent'], first_seen, vt, unsigned,
+        )
+
+        # ── Whitelist / Blacklist override ───────────────────────
+        if check_list(process_lists['whitelist'], p['name'], file_hash, p['path']):
+            risk_level = 'low'
+            score      = 0
+            reasons    = ['whitelisted']
+        elif check_list(process_lists['blacklist'], p['name'], file_hash, p['path']):
+            risk_level = 'high'
+            score      = 100
+            reasons    = ['blacklisted']
+
+        p.update({
+            'first_seen': first_seen,
+            'risk_level': risk_level,   # 'high'/'medium'/'low'
+            'score':      score,
+            'reasons':    reasons,
+            'vt':         vt,
+        })
+
+    notify_risky_processes(raw_processes)
+
+    # Phase 4 — build and write the dashboard snapshot (same shape as local)
+    snapshot = build_snapshot(raw_processes)
+    with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
+        json.dump(snapshot, f, indent=2)
+
+    # Phase 5 — one authenticated POST delivers the whole scan. scan_uuid
+    # lets the server dedupe if the POST is retried after a network drop.
+    payload = {
+        'snapshot':      json.dumps(snapshot),
+        'process_count': len(raw_processes),
+        'scan_uuid':     str(uuid.uuid4()),
+        'hostname':      HOSTNAME,
+        'processes': [
+            {
+                'pid':         p['pid'],
+                'name':        p['name'],
+                'path':        p['path'] or None,
+                'cpu_percent': p['cpu_percent'],
+                'memory_mb':   p['memory_mb'],
+                'status':      p['user'],
+                'hash':        p['hash'],
+                'first_seen':  p['first_seen'],
+                'risk_level':  p['risk_level'],
+                'score':       p['score'],
+                'reasons':     p['reasons'],
+                'virus_total_data': p['vt'],
+            }
+            for p in raw_processes
+        ],
+    }
+    response = client.post_snapshot(payload)
+    print(f"[API] Snapshot stored (server id {response.get('snapshot_id')}, "
+          f"duplicate={response.get('duplicate')})")
+
+    return snapshot
+
+
+def run_api_agent(scan_interval=30, max_iterations=None):
+    """Keep API-only agents alive through tunnel or network interruptions."""
+    try:
+        client = ApiClient()
+    except ApiError as exc:
+        print(f'[API] Setup error: {exc}')
+        return
+
+    print(f'[API] SentinelProc agent starting for {client.base_url}.')
+    was_reachable = False
+    iteration = 0
+
+    while max_iterations is None or iteration < max_iterations:
+        try:
+            client.check_health()
+        except ApiError as exc:
+            print(f'[API] Server not reachable: {exc}')
+            was_reachable = False
+        else:
+            if not was_reachable:
+                print(f'[API] Server reachable at {client.base_url}.')
+            was_reachable = True
+
+            try:
+                collect_snapshot_api(client)
+            except ApiError as exc:
+                print(f'[API] Scan failed; will retry: {exc}')
+            except Exception as exc:
+                print(f'[Agent] Scan failed; will retry: {exc}')
+
+        iteration += 1
+        if max_iterations is None or iteration < max_iterations:
+            time.sleep(scan_interval)
+
+
 # ── Entry point ───────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print('SentinelProc — collecting snapshot...')
-    snapshot = collect_snapshot()
+    if TRANSPORT == 'api':
+        run_api_agent()
+    else:
+        print('SentinelProc — collecting snapshot...')
+        snapshot = collect_snapshot()
 
-    high  = next((s['value'] for s in snapshot['stats'] if s['label'] == 'High Risk'),  '0')
-    med   = next((s['value'] for s in snapshot['stats'] if s['label'] == 'Medium Risk'), '0')
-    total = next((s['value'] for s in snapshot['stats'] if s['label'] == 'Running Processes'), '0')
+        high  = next((s['value'] for s in snapshot['stats'] if s['label'] == 'High Risk'),  '0')
+        med   = next((s['value'] for s in snapshot['stats'] if s['label'] == 'Medium Risk'), '0')
+        total = next((s['value'] for s in snapshot['stats'] if s['label'] == 'Running Processes'), '0')
 
-    print(json.dumps({
-        'snapshot_written': OUTPUT_PATH,
-        'total_processes':  total,
-        'high_risk':        high,
-        'medium_risk':      med,
-        'alerts_generated': len([a for a in snapshot['alerts'] if a['severity'] != 'LOW']),
-        'mysql':            _MYSQL_AVAILABLE,
-        'vt_enabled':       bool(VT_API_KEY),
-    }, indent=2))
+        print(json.dumps({
+            'snapshot_written': OUTPUT_PATH,
+            'total_processes':  total,
+            'high_risk':        high,
+            'medium_risk':      med,
+            'alerts_generated': len([a for a in snapshot['alerts'] if a['severity'] != 'LOW']),
+            'transport':        TRANSPORT,
+            'mysql':            _MYSQL_AVAILABLE,
+            'vt_enabled':       bool(VT_API_KEY),
+        }, indent=2))

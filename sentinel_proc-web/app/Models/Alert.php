@@ -10,6 +10,7 @@ class Alert extends Model
     protected $fillable = [
         'monitoring_snapshot_id',
         'process_id',
+        'hostname',
         'alert_type',
         'severity',
         'message',

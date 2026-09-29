@@ -29,5 +29,19 @@ class AppServiceProvider extends ServiceProvider
 
             return Limit::perMinute(5)->by($key);
         });
+
+        RateLimiter::for('agent-ingest', function (Request $request) {
+            $token = $request->bearerToken();
+            $tokenKey = $token === null
+                ? 'missing|' . $request->ip()
+                : hash('sha256', $token);
+
+            return [
+                Limit::perMinute((int) config('monitoring_api.rate_limit_per_token', 60))
+                    ->by('agent-token|' . $tokenKey),
+                Limit::perMinute((int) config('monitoring_api.rate_limit_per_ip', 120))
+                    ->by('agent-ip|' . $request->ip()),
+            ];
+        });
     }
 }

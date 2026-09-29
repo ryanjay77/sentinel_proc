@@ -9,6 +9,18 @@
             <h1 class="mt-2 text-3xl font-bold">Process Monitoring Dashboard</h1>
         </div>
         <div class="flex items-center gap-3">
+            @if (count($hostnames) > 0)
+                <form method="GET" action="{{ route('dashboard') }}" class="flex items-center gap-2">
+                    <label for="hostnameFilter" class="text-xs font-medium uppercase tracking-wider text-slate-400">Laptop</label>
+                    <select id="hostnameFilter" name="hostname" onchange="this.form.submit()"
+                            class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 transition focus:border-cyan-500 focus:outline-none">
+                        <option value="">All laptops</option>
+                        @foreach ($hostnames as $host)
+                            <option value="{{ $host }}" @selected($hostnameFilter === $host)>{{ $host }}</option>
+                        @endforeach
+                    </select>
+                </form>
+            @endif
             @if (auth()->user()->canRefresh())
                 <button id="refreshSnapshot" type="button" class="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 font-semibold text-cyan-300 transition hover:bg-cyan-500/20">Refresh Snapshot</button>
             @endif
@@ -17,6 +29,28 @@
             @endif
         </div>
     </div>
+
+    <section class="mb-8 rounded-xl border border-slate-800 bg-slate-900 p-5" aria-labelledby="agents-heading">
+        <div class="mb-4 flex items-center justify-between">
+            <h2 id="agents-heading" class="text-lg font-semibold">Monitored laptops</h2>
+            <span class="text-xs text-slate-400">Online when seen within 30 seconds</span>
+        </div>
+        @forelse ($agents as $agent)
+            <a href="{{ route('dashboard', ['hostname' => $agent['hostname']]) }}"
+               class="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 py-3 first:border-t-0 {{ $hostnameFilter === $agent['hostname'] ? 'text-cyan-300' : 'text-slate-200' }}">
+                <span class="font-medium">{{ $agent['hostname'] }}</span>
+                <span class="text-xs text-slate-400">{{ $agent['ip_address'] ?: 'IP unavailable' }}</span>
+                <span class="text-xs {{ $agent['is_online'] ? 'text-emerald-400' : 'text-slate-500' }}">
+                    {{ $agent['is_online'] ? 'Online' : 'Offline' }}
+                    @if ($agent['last_seen'])
+                        <span class="text-slate-500">· {{ $agent['last_seen']->diffForHumans() }}</span>
+                    @endif
+                </span>
+            </a>
+        @empty
+            <p class="border-t border-slate-800 pt-3 text-sm text-slate-500">No laptops have reported yet.</p>
+        @endforelse
+    </section>
 
     <div class="mb-8 grid grid-cols-4 gap-4">
         @foreach ($stats as $stat)
@@ -91,7 +125,12 @@
     <div class="grid grid-cols-3 gap-6">
         <div class="col-span-2 rounded-xl border border-slate-800 bg-slate-900 p-5">
             <div class="mb-4 flex items-center justify-between">
-                <h2 class="text-xl font-semibold">Live Process Activity</h2>
+                <div class="flex items-center gap-3">
+                    <h2 class="text-xl font-semibold">Live Process Activity</h2>
+                    @if ($snapshotHostname)
+                        <span class="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-xs font-medium text-cyan-300">{{ $snapshotHostname }}</span>
+                    @endif
+                </div>
                 <span class="text-xs text-slate-400">{{ $generatedAt ? 'Updated ' . \Carbon\Carbon::parse($generatedAt)->diffForHumans() : 'Updated 12s ago' }}</span>
             </div>
 
@@ -108,7 +147,7 @@
                         </tr>
                     </thead>
                     <tbody>
-                        @foreach ($processes as $proc)
+                        @forelse ($processes as $proc)
                             <tr class="border-t border-slate-800 bg-slate-900 hover:bg-slate-800/80">
                                 <td class="px-4 py-3">{{ $proc['pid'] }}</td>
                                 <td class="px-4 py-3">{{ $proc['name'] }}</td>
@@ -121,7 +160,13 @@
                                     </span>
                                 </td>
                             </tr>
-                        @endforeach
+                        @empty
+                            <tr>
+                                <td colspan="6" class="px-4 py-8 text-center text-sm text-slate-500">
+                                    {{ $hostnameFilter ? "No scans from {$hostnameFilter} yet." : 'No process data yet.' }}
+                                </td>
+                            </tr>
+                        @endforelse
                     </tbody>
                 </table>
             </div>
@@ -130,7 +175,7 @@
         <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
             <h2 class="mb-4 text-xl font-semibold">Security Alerts</h2>
             <div class="space-y-3">
-                @foreach ($alerts as $alert)
+                @forelse ($alerts as $alert)
                     <div class="rounded-lg border border-slate-800 p-3">
                         <div class="flex items-center justify-between">
                             <span class="rounded-full px-2 py-1 text-xs font-semibold {{ $alert['severity'] === 'HIGH' ? 'bg-red-500/20 text-red-300' : ($alert['severity'] === 'MEDIUM' ? 'bg-amber-500/20 text-amber-300' : 'bg-cyan-500/20 text-cyan-300') }}">
@@ -141,7 +186,9 @@
                         <div class="mt-2 text-sm font-medium">{{ $alert['title'] }}</div>
                         <div class="mt-1 break-all text-xs text-slate-400">{{ $alert['source'] }}</div>
                     </div>
-                @endforeach
+                @empty
+                    <div class="rounded-lg border border-slate-800 p-3 text-sm text-slate-500">No alerts to show.</div>
+                @endforelse
             </div>
         </div>
     </div>

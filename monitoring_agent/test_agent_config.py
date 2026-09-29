@@ -58,6 +58,42 @@ class VtApiKeyTests(unittest.TestCase):
             self.assertEqual(agent_config.vt_api_key(), 'abc123')
 
 
+class TransportTests(unittest.TestCase):
+    def test_transport_defaults_to_local(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('SENTINEL_TRANSPORT', None)
+            self.assertEqual(agent_config.transport(), 'local')
+
+    def test_transport_is_normalized(self):
+        with mock.patch.dict(os.environ, {'SENTINEL_TRANSPORT': '  API '}):
+            self.assertEqual(agent_config.transport(), 'api')
+
+    def test_api_settings_default_to_empty(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for key in ('SENTINEL_API_URL', 'SENTINEL_API_TOKEN'):
+                os.environ.pop(key, None)
+            self.assertEqual(agent_config.api_url(), '')
+            self.assertEqual(agent_config.api_token(), '')
+
+    def test_api_url_strips_trailing_slashes(self):
+        with mock.patch.dict(os.environ, {
+            'SENTINEL_API_URL': 'https://sentinel.example.test///',
+            'SENTINEL_API_TOKEN': '  tok-123  ',
+        }):
+            self.assertEqual(
+                agent_config.api_url(), 'https://sentinel.example.test'
+            )
+            self.assertEqual(agent_config.api_token(), 'tok-123')
+
+    def test_http_transport_is_disabled_unless_explicitly_allowed(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('SENTINEL_ALLOW_HTTP', None)
+            self.assertFalse(agent_config.api_allow_http())
+
+        with mock.patch.dict(os.environ, {'SENTINEL_ALLOW_HTTP': ' true '}):
+            self.assertTrue(agent_config.api_allow_http())
+
+
 class LoadEnvFileTests(unittest.TestCase):
     def _write_env_file(self, contents):
         handle = tempfile.NamedTemporaryFile(

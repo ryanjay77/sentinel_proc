@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Enums\UserRole;
+use App\Models\Agent;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -161,5 +162,64 @@ class SentinelDashboardTest extends TestCase
         $response->assertSee('Top 5 Memory Consumers');
         $response->assertSee('riskLevelChart', false);
         $response->assertSee('memoryConsumersChart', false);
+    }
+
+    public function test_dashboard_filters_snapshot_processes_and_alerts_by_hostname(): void
+    {
+        foreach ([
+            'laptop-one' => 'one-only-process',
+            'laptop-two' => 'two-only-process',
+        ] as $hostname => $processName) {
+            DB::table('monitoring_snapshots')->insert([
+                'snapshot' => json_encode([
+                    'stats' => [['label' => 'Running Processes', 'value' => '1', 'trend' => '', 'tone' => 'primary']],
+                    'processes' => [[
+                        'pid' => 1, 'name' => $processName, 'user' => 'tester',
+                        'cpu' => '1%', 'memory' => '1 MB', 'status' => 'Normal',
+                    ]],
+                    'alerts' => [['severity' => 'LOW', 'title' => $hostname . ' alert', 'time' => 'just now', 'source' => $processName]],
+                    'generated_at' => now()->toIso8601String(),
+                ]),
+                'hostname' => $hostname,
+                'snapshot_timestamp' => now(),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        $response = $this->actingAs($this->admin())->get('/dashboard?hostname=laptop-one');
+
+        $response->assertOk();
+        $response->assertSee('laptop-one');
+        $response->assertSee('one-only-process');
+        $response->assertDontSee('two-only-process');
+        $response->assertSee('name="hostname"', false);
+        $response->assertSee('laptop-two');
+    }
+
+    public function test_dashboard_shows_dynamic_agent_presence_and_laptop_filter_links(): void
+    {
+        Agent::create([
+            'hostname' => 'online-laptop',
+            'ip_address' => '192.168.43.2',
+            'last_seen' => now()->subSeconds(15),
+            'status' => 'online',
+        ]);
+        Agent::create([
+            'hostname' => 'offline-laptop',
+            'ip_address' => '192.168.43.3',
+            'last_seen' => now()->subSeconds(45),
+            'status' => 'online',
+        ]);
+
+        $response = $this->actingAs($this->admin())->get('/dashboard');
+
+        $response->assertOk();
+        $response->assertSee('online-laptop');
+        $response->assertSee('offline-laptop');
+        $response->assertSee('Online');
+        $response->assertSee('Offline');
+        $response->assertSee('?hostname=online-laptop', false);
+        $response->assertSee('?hostname=offline-laptop', false);
     }
 }

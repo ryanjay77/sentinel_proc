@@ -309,14 +309,13 @@ High and Critical findings were the agreed scope. The following were identified 
 
 | Item | Nature | Why it was left |
 |---|---|---|
-| `role` present in `User::$fillable` | A future mass-assignment call site could set a role | All current writes go through validated controller paths; the model-level guard is missing but no reachable path exploits it. Medium severity. |
-| `processes.path` validated to 1000 chars, column is `varchar(512)` | A long path passes validation and fails at the database | Now rolls back cleanly (item 15) instead of corrupting, but it returns 500 where 422 is correct. Truncating the rule to 512 is a one-line fix left for the next pass. |
-| No automated test covers the API routes | Items 13 and 14 were both invisible to the suite | The two defects were found by running the app, not by the tests. The suite covers the web UI and the agent, not the token flow. |
+| API route coverage is still narrower than the web UI | Not every API validation and failure branch has an integration test | Token auth, revocation, rate limiting, proxy IP, and health behavior now have feature coverage; other payload edge cases remain. |
+| API route coverage is still narrower than the web UI | Not every API validation and failure branch has an integration test | Token auth, revocation, rate limiting, proxy IP, and health behavior now have feature coverage; other payload edge cases remain. |
 | Agent issues its DB calls inside the scan loop | Throughput, not a vulnerability | Performance, not security. |
 | `load_process_lists` swallows exceptions silently | A failed whitelist/blacklist load is invisible | Availability/diagnosability, not a security boundary. |
 | No Subresource Integrity on the Tailwind and Chart.js CDN tags | A compromised CDN could serve modified script | Requires pinned versions; the CDNs are already allow-listed in the CSP. |
 | Settings page displays DB host/name/user and mail host | Infrastructure disclosure to **Admin** users only | Admin is a trusted role; the page exists to serve that purpose. |
-| `.env` retains the demo DB password and `APP_DEBUG=true` | Debug error pages are verbose | Retained deliberately so the live defence demonstration keeps working. |
+| The local `.env` may contain a demo DB password and `APP_DEBUG=true` | Debug pages are verbose and local credentials must not be exposed | Do not publish while debug is enabled. Set `APP_DEBUG=false` before any public demo, keep DB credentials off remote agents, and rotate any credential that was exposed. |
 
 ---
 
@@ -334,3 +333,108 @@ High and Critical findings were the agreed scope. The following were identified 
 | Agent | `monitoring_agent/agent_config.py` (new), `cpu_sampling.py` (new), `live_monitor.py`, `virus_total.py`, `risk_scoring.py`, `schema.sql` |
 | Agent config | `monitoring_agent/.env` (new, gitignored), `monitoring_agent/.env.example` (new), `.gitignore` |
 | Tests | `monitoring_agent/test_agent_config.py`, `test_cpu_sampling.py`, `test_suspicious_path.py`, `test_live_monitor.py` |
+
+---
+
+## 16. Multi-laptop deployment and agent warnings
+
+- **Token authentication:** API-only agents use individual Sanctum bearer tokens with only the
+  abilities needed to fetch scan context and submit snapshots. Revoke a device token when a laptop
+  is retired or its configuration is exposed. Send tokens only to the public HTTPS endpoint.
+- **No database credentials on remote agents:** an API-only laptop sets `SENTINEL_TRANSPORT=api`,
+  `SENTINEL_API_URL`, and its own `SENTINEL_API_TOKEN`. It does not receive MySQL host, username,
+  or password settings; API mode does not connect to MySQL. The sample `.env.example` keeps local
+  database settings commented out to make this separation explicit.
+- **Advisory-only popups:** Windows `MessageBoxW` warnings are shown for medium/high detections,
+  once per unique hash per agent run, on a background thread. They do not terminate processes,
+  modify files, or send remote commands. Medium wording asks the user to **check** whether they
+  started the program; it does not label the file infected.
+- **Consent and authorization:** inform monitored laptop users what process metadata is collected
+  (including executable names, paths, hashes, and usernames) and obtain their consent/authorization
+  before installing or running the agent. Use the demo only on devices you own or are authorized
+  to monitor.
+- **Network identity:** a phone hotspot commonly NATs multiple laptops behind one public IP. The
+  recorded IP is connection metadata; hostname is used for per-laptop dashboard attribution.
+
+## 17. Public HTTPS tunnel demo
+
+Cloudflare Quick Tunnels publish the laptop's Laravel development server at a public,
+temporary `https://…trycloudflare.com` URL. Anyone who learns that URL can reach the login page and
+API while the tunnel is running. This is suitable only for a short demo with non-sensitive data;
+the tunnel URL changing on restart is not an access-control mechanism.
+
+- Set `APP_DEBUG=false`, `APP_URL` to the current HTTPS tunnel URL, and
+  `TRUSTED_PROXIES=127.0.0.1,::1`; clear Laravel's config cache after editing `.env`. Only the
+  local cloudflared connection is trusted to supply forwarded client IP and HTTPS headers.
+- Set `SESSION_SECURE_COOKIE=true`, `SESSION_HTTP_ONLY=true`, and `SESSION_SAME_SITE=lax` so the
+  browser session is not exposed to script access and is sent only over HTTPS.
+- Use one Sanctum token per laptop. Sanctum stores only a SHA-256 hash, the issued tokens are
+  limited to monitoring context and snapshot abilities, and deleting the token row revokes it.
+  The demo runbook issues `demo-`-prefixed names and deletes those rows after the demo.
+- Agent POSTs are rate-limited independently to 60 requests/minute per token and 120/minute per
+  client IP by default. Login attempts are limited to five/minute per email and IP.
+- Remote agents receive no MySQL credentials and no VirusTotal key. API mode does not connect to
+  MySQL or make VirusTotal requests; it uses server-provided cached results only.
+- Risk popups are advisory only: they do not terminate processes, modify files, or execute remote
+  commands. Tell monitored users what process metadata is collected and obtain their consent or
+  authorization before monitoring their devices.
+- Keep the host laptop on and awake during the demo. Stop the tunnel and revoke the demo tokens
+  immediately afterward, then restore the local `APP_URL`.
+
+---
+
+## 18. API-only hardening — remote agents never query VirusTotal
+
+**What was wrong.** A remote agent configured with `SENTINEL_TRANSPORT=api` and an accidentally
+set `VT_API_KEY` would still attempt VirusTotal lookups from the laptop, consuming API quota and
+exposing the key in the agent's environment. The API transport mode was designed to use only
+server-provided cached results, but nothing prevented a misconfigured agent from making direct
+VT calls.
+
+**What changed.** The API scan path in `live_monitor.py` now unconditionally skips VirusTotal
+lookups when `SENTINEL_TRANSPORT=api`. The agent fetches known hashes and cached VT results from
+the server via `POST /api/monitoring/context` and uses only those cached results for risk
+scoring. The `VT_API_KEY` environment variable is ignored entirely in API mode.
+
+**Files.** `monitoring_agent/live_monitor.py` (API scan path).
+
+**Verification.** `monitoring_agent/test_live_monitor.py` — 11 tests pass for live-monitor tests,
+including the API-only VT check proving remote agents never query VirusTotal even if a key is
+accidentally configured.
+
+---
+
+## 19. Explicit hotspot HTTP opt-in
+
+**What was wrong.** The agent's API client would silently accept `http://` URLs without any
+explicit opt-in, creating a risk of accidental credential exposure over unencrypted connections.
+
+**What changed.** The API client now requires `SENTINEL_ALLOW_HTTP=true` to be explicitly set
+before it will accept an `http://` URL. Without this flag, an `http://` URL is rejected with a
+clear error message. The flag does not disable certificate verification for HTTPS connections —
+it only permits plain HTTP as an explicit, deliberate choice for trusted local networks.
+
+**Files.** `monitoring_agent/api_client.py`; `monitoring_agent/agent_config.py`.
+
+**Verification.** `monitoring_agent/test_api_client.py` — 24 tests pass across config/client tests,
+including the explicit hotspot HTTP opt-in tests.
+
+---
+
+## 20. Token-per-laptop setup and revocation
+
+**What was wrong.** The demo runbook did not clearly separate the phases of token generation,
+agent configuration, live demo, and cleanup. There was no explicit revocation step, and the
+hotspot backup plan was buried in a single paragraph.
+
+**What changed.** The demo runbook (`DEMO_SCRIPT.md`) now follows a strict four-phase ordered
+runbook: (1) server preparation, (2) token-per-laptop setup, (3) live demo, (4) cleanup and
+revocation. Each phase has numbered steps. The revocation step explicitly deletes all
+`demo-`-prefixed tokens. The hotspot backup plan is a separate subsection with its own security
+warnings. A new `monitoring_agent/.env.example` template documents all available settings with
+clear sections for transport, database, API, VirusTotal, and scan tuning.
+
+**Files.** `DEMO_SCRIPT.md`; `monitoring_agent/.env.example` (new).
+
+**Verification.** Both files read directly; the runbook phases are ordered and the `.env.example`
+covers all configuration keys referenced in `agent_config.py`.

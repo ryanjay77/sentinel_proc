@@ -38,8 +38,10 @@ class GenerateMonitoringToken extends Command
             ]
         );
 
-        // Create a new API token scoped to snapshot ingestion only.
-        $token = $user->createToken($tokenName, ['monitoring:write']);
+        // Create a new API token scoped to agent telemetry only:
+        // monitoring:write    — POST /api/monitoring/snapshot
+        // monitoring:context  — POST /api/monitoring/context
+        $token = $user->createToken($tokenName, ['monitoring:write', 'monitoring:context']);
 
         $this->info('');
         $this->info('=== Monitoring Agent API Token ===');

@@ -61,3 +61,22 @@ def db_config():
 
 def vt_api_key():
     return os.getenv('VT_API_KEY', '')
+
+
+def transport():
+    """'local' (default) writes straight to MySQL; 'api' sends everything
+    over the authenticated HTTPS API so remote laptops never touch the
+    database directly."""
+    return os.getenv('SENTINEL_TRANSPORT', 'local').strip().lower()
+
+
+def api_url():
+    return os.getenv('SENTINEL_API_URL', '').strip().rstrip('/')
+
+
+def api_token():
+    return os.getenv('SENTINEL_API_TOKEN', '').strip()
+
+
+def api_allow_http():
+    return os.getenv('SENTINEL_ALLOW_HTTP', '').strip().lower() in {'1', 'true', 'yes', 'on'}

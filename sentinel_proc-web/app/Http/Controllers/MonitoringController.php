@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Agent;
 use App\Services\DashboardAnalyticsService;
 use App\Services\LiveSnapshotService;
+use Illuminate\Http\Request;
 
 class MonitoringController extends Controller
 {
@@ -30,16 +32,39 @@ class MonitoringController extends Controller
     /**
      * Show the dashboard
      */
-    public function index(LiveSnapshotService $snapshots, DashboardAnalyticsService $analytics)
+    public function index(Request $request, LiveSnapshotService $snapshots, DashboardAnalyticsService $analytics)
     {
-        $snapshot = $snapshots->load();
+        $hostnameFilter = $request->query('hostname');
+        if (! is_string($hostnameFilter) || $hostnameFilter === ''
+            || ! preg_match('/^[A-Za-z0-9._-]{1,255}$/', $hostnameFilter)) {
+            $hostnameFilter = null;
+        }
+
+        $snapshot = $snapshots->load($hostnameFilter);
+        $agents = Agent::query()->orderBy('hostname')->get()->map(function (Agent $agent) {
+            return [
+                'hostname' => $agent->hostname,
+                'ip_address' => $agent->ip_address,
+                'last_seen' => $agent->last_seen,
+                'is_online' => $agent->last_seen !== null
+                    && $agent->last_seen->greaterThanOrEqualTo(now()->subSeconds(30)),
+            ];
+        });
+
+        // Placeholder data only fills an empty unfiltered dashboard; a
+        // filtered miss means the laptop has no scans yet and stays empty.
+        $useDefaults = $snapshot === null && $hostnameFilter === null;
 
         return view('dashboard', [
-            'stats' => $snapshot['stats'] ?? self::DEFAULT_STATS,
-            'processes' => $snapshot['processes'] ?? self::DEFAULT_PROCESSES,
-            'alerts' => $snapshot['alerts'] ?? self::DEFAULT_ALERTS,
+            'stats' => $snapshot['stats'] ?? ($useDefaults ? self::DEFAULT_STATS : []),
+            'processes' => $snapshot['processes'] ?? ($useDefaults ? self::DEFAULT_PROCESSES : []),
+            'alerts' => $snapshot['alerts'] ?? ($useDefaults ? self::DEFAULT_ALERTS : []),
             'generatedAt' => $snapshot['generated_at'] ?? null,
             'analytics' => $analytics->summary(),
+            'hostnameFilter' => $hostnameFilter,
+            'snapshotHostname' => $hostnameFilter ?: ($snapshot['hostname'] ?? null),
+            'hostnames' => $snapshots->hostnames(),
+            'agents' => $agents,
         ]);
     }
 

@@ -9,7 +9,9 @@ class MonitoringSnapshot extends Model
 {
     protected $fillable = [
         'snapshot',
+        'scan_uuid',
         'snapshot_timestamp',
+        'hostname',
         'process_count',
         'cpu_usage',
         'memory_usage',

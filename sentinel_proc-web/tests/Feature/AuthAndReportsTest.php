@@ -28,6 +28,53 @@ class AuthAndReportsTest extends TestCase
         $this->assertAuthenticatedAs(User::where('email', 'analyst@sentinel.local')->first());
     }
 
+    public function test_login_redirect_uses_https_from_a_trusted_proxy(): void
+    {
+        config([
+            'session.secure' => true,
+            'session.http_only' => true,
+            'session.same_site' => 'lax',
+        ]);
+
+        User::factory()->create([
+            'email' => 'https-user@sentinel.local',
+            'password' => 'password',
+            'role' => UserRole::Analyst,
+        ]);
+
+        $response = $this->withServerVariables(['REMOTE_ADDR' => '127.0.0.1'])
+            ->withHeaders(['X-Forwarded-Proto' => 'https'])
+            ->post('/login', [
+                'email' => 'https-user@sentinel.local',
+                'password' => 'password',
+            ]);
+
+        $response->assertRedirect();
+        $this->assertStringStartsWith('https://', $response->headers->get('Location'));
+
+        $cookie = collect($response->headers->getCookies())
+            ->first(fn ($cookie) => $cookie->getName() === config('session.cookie'));
+        $this->assertNotNull($cookie);
+        $this->assertTrue($cookie->isSecure());
+        $this->assertTrue($cookie->isHttpOnly());
+        $this->assertSame('lax', $cookie->getSameSite());
+    }
+
+    public function test_failed_login_attempts_are_throttled(): void
+    {
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $this->post('/login', [
+                'email' => 'missing-user@sentinel.local',
+                'password' => 'wrong-password',
+            ])->assertSessionHasErrors('email');
+        }
+
+        $this->post('/login', [
+            'email' => 'missing-user@sentinel.local',
+            'password' => 'wrong-password',
+        ])->assertTooManyRequests();
+    }
+
     public function test_reports_page_lists_available_reports(): void
     {
         $admin = User::factory()->create(['role' => UserRole::Admin]);

@@ -34,12 +34,12 @@ class UserController extends Controller
             'password' => ['required', Password::min(8)->letters()->numbers(), 'confirmed'],
         ]);
 
-        User::create([
+        $user = User::create([
             'name'     => $data['name'],
             'email'    => $data['email'],
-            'role'     => $data['role'],
             'password' => Hash::make($data['password']),
         ]);
+        $user->forceFill(['role' => $data['role']])->save();
 
         \App\Models\SystemAuditLog::record('create_user', 'User', null, $data['name'], ['role' => $data['role']]);
 

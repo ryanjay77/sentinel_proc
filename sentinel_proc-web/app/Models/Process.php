@@ -12,6 +12,7 @@ class Process extends Model
         'monitoring_snapshot_id',
         'pid',
         'name',
+        'hostname',
         'path',
         'cpu_percent',
         'memory_mb',

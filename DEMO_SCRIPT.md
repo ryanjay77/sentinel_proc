@@ -1,7 +1,7 @@
 # SentinelProc — Live Demo Script
 
 **Project:** A Real-Time Process Monitoring and Access Control System with Risk-Based Threat Detection
-**Stack:** Python agent (psutil + VirusTotal) → MySQL → Laravel 12 + Blade/Tailwind UI
+**Stack:** Python agent (psutil + VirusTotal) → MySQL locally or authenticated HTTPS API remotely → Laravel 12 + Blade/Tailwind UI
 **URL:** http://127.0.0.1:8000
 **Demo accounts:** `admin@sentinel.local` / `analyst@sentinel.local` / `viewer@sentinel.local` — password `password` (all three)
 
@@ -26,6 +26,64 @@ php artisan serve --host=127.0.0.1 --port=8000
 
 Open http://127.0.0.1:8000 and log in as `admin@sentinel.local` / `password`. If the dashboard shows
 data, you are ready.
+
+## Public URL demo (ordered runbook)
+
+### Phase 1 — Server preparation
+
+1. Start XAMPP MySQL.
+2. In `C:\xampp\htdocs\sentinel_proc\sentinel_proc-web`, run migrations if needed:
+   `php artisan migrate`.
+3. Start Laravel and leave this terminal running:
+   `php artisan serve --host=0.0.0.0 --port=8000`.
+4. Run `start_tunnel.bat` from the project root. Copy the printed `https://…trycloudflare.com`
+   URL; this is the public server URL for this run.
+5. In `sentinel_proc-web/.env`, set `APP_URL` to that HTTPS URL, keep
+   `TRUSTED_PROXIES=127.0.0.1,::1`, set `APP_DEBUG=false`, and set
+   `SESSION_SECURE_COOKIE=true`, `SESSION_HTTP_ONLY=true`, and `SESSION_SAME_SITE=lax`. Keep the
+   default limits `AGENT_API_RATE_LIMIT_PER_TOKEN=60` and `AGENT_API_RATE_LIMIT_PER_IP=120` unless
+   the demo needs different capacity. Run `php artisan config:clear` from `sentinel_proc-web`.
+   `TRUSTED_PROXIES` is the local cloudflared-to-Laravel connection; requests from other sources
+   cannot supply trusted forwarded IP or HTTPS headers. Without a tunnel, use
+   `APP_URL=http://127.0.0.1:8000` and normal direct client IP detection.
+
+### Phase 2 — Token-per-laptop setup
+
+6. Generate one uniquely named token per remote laptop. Save each printed token; it is shown once:
+   `php artisan app:generate-monitoring-token --user=demo-laptop-1 --name=demo-laptop-1`.
+   Repeat with a different `--user` and `--name` for every laptop.
+7. On each other laptop, create `monitoring_agent/.env` with
+   `SENTINEL_TRANSPORT=api`, `SENTINEL_API_URL=<the tunnel URL>`, and that laptop's
+   `SENTINEL_API_TOKEN`. Leave MySQL credentials and `VT_API_KEY` unset. Leave
+   `SENTINEL_ALLOW_HTTP` unset or false. From `monitoring_agent`, run `python live_monitor.py`;
+   API mode checks health and scans every 30 seconds until stopped with Ctrl+C.
+
+### Phase 3 — Live demo
+
+8. Confirm each laptop appears Online in the dashboard, trigger the blacklist demo, show the alert
+   and advisory popup, then export a CSV from Reports.
+
+### Phase 4 — Cleanup and revocation
+
+9. Stop all agent scan loops with Ctrl+C on each laptop.
+10. Stop cloudflared and the Laravel server with Ctrl+C.
+11. Revoke the demo agent tokens:
+    `php artisan tinker --execute="DB::table('personal_access_tokens')->where('name', 'like', 'demo-%')->delete();"`.
+    This removes tokens named with the `demo-` prefix.
+12. Set `APP_URL` back to `http://127.0.0.1:8000` and run `php artisan config:clear`.
+13. Delete any demo snapshots created during the presentation (see Scene 6 cleanup above).
+
+The free quick-tunnel URL changes each time the tunnel restarts. The Laravel laptop must stay on
+and awake throughout the demo. The public URL exposes the login page and API to the internet; use
+only demo data, keep `APP_DEBUG=false`, and stop the tunnel as soon as the demo ends.
+
+### Hotspot backup plan
+
+If the tunnel is unavailable, connect the laptops to your phone hotspot and set each agent's
+`SENTINEL_API_URL=http://<LAN-IP>:8000` using the Laravel laptop's hotspot IPv4 address (find it
+with `ipconfig`). Set `SENTINEL_ALLOW_HTTP=true` on those agents. HTTP does not encrypt traffic or
+tokens, so use this only on your own trusted hotspot, never on public Wi-Fi. This opt-in does not
+disable certificate verification for HTTPS connections.
 
 **Checklist before you start talking**
 
@@ -157,6 +215,12 @@ curl -i -X POST http://127.0.0.1:8000/api/monitoring/snapshot \
 is rejected with **403 Invalid ability provided**, and the agent's token cannot read the
 history endpoints at all — those require an analyst or admin **user session**.
 
+**Also say (remote laptops):** this same API is how the agent runs on *other* machines. On a
+remote laptop the agent sets `SENTINEL_TRANSPORT=api` plus the server URL and token (see
+`monitoring_agent/.env.example`), fetches the first-seen/VirusTotal/whitelist context in one
+call, scores locally, and posts the finished scan over HTTPS — it never needs database
+credentials. Each scan carries a `scan_uuid`, so a network retry can never double-count it.
+
 **Cleanup:** if you create a demo snapshot during the presentation, it stays in the database.
 It will not disturb the dashboard (the dashboard only accepts snapshots that contain stats,
 processes *and* alerts). Delete it afterwards if you want the database pristine:
@@ -179,6 +243,83 @@ php artisan tinker --execute="DB::table('processes')->where('monitoring_snapshot
 | Security headers | `curl -I http://127.0.0.1:8000/login` → `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy` |
 | Audit trail | `/activity/system` (admin) lists logins, report exports, refreshes, acknowledgements |
 
+### Remote multi-laptop scene — two laptops over a phone hotspot
+
+This scene assumes SentinelProc is already deployed at a public HTTPS URL, the hostname/agent
+migrations have been applied, and both laptops can reach that URL through the phone hotspot. The
+hotspot provides internet access; no router port forwarding or direct MySQL access is needed.
+Only run this on laptops whose users have been informed and have agreed to the monitoring.
+
+1. Connect both laptops to the phone hotspot. On each laptop, install Python, clone the project,
+   then from the project root create and prepare the agent environment:
+
+   ```powershell
+   py -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install -r monitoring_agent\requirements.txt
+   ```
+
+2. On the server, apply migrations and mint a different API token for each laptop. The token is
+   shown only once; keep it private and do not commit it:
+
+   ```powershell
+   cd C:\path\to\sentinel_proc\sentinel_proc-web
+   php artisan migrate --force
+   php artisan app:generate-monitoring-token --name=agent-LAPTOP_A
+   php artisan app:generate-monitoring-token --name=agent-LAPTOP_B
+   ```
+
+3. On each laptop, create `monitoring_agent/.env` with only its own transport, server URL, and
+   token. Use the laptop's unique token. Do not add any `SENTINEL_DB_*` settings or MySQL password:
+
+   ```dotenv
+   SENTINEL_TRANSPORT=api
+   SENTINEL_API_URL=https://your-public-sentinel-domain.example
+   SENTINEL_API_TOKEN=paste-this-laptops-token-here
+   ```
+
+4. On Laptop A, sign into the dashboard as admin and open **Whitelist / Blacklist**. Add a
+   blacklist rule with `Match by: name`, `Value: notepad.exe`. This creates a predictable HIGH
+   detection without downloading or executing a test malware sample.
+
+5. On both laptops, from the project root with the virtual environment active, run this loop in
+   PowerShell. It scans every 20 seconds in one Python process, keeping presence current while
+   ensuring the same hash only raises one popup during that agent run. Leave both terminals open:
+
+   ```powershell
+   $env:PYTHONPATH = "$PWD\monitoring_agent"
+   @'
+   import time
+   import live_monitor
+   while True:
+       live_monitor.collect_snapshot()
+       time.sleep(20)
+   '@ | python -
+   ```
+
+6. On Laptop A, return to the dashboard and confirm both hostnames show **Online**. Click Laptop B
+   in **Monitored laptops**; the process view is filtered to that hostname.
+
+7. On Laptop B, open a separate PowerShell window and launch the harmless test process:
+
+   ```powershell
+   Start-Process notepad.exe
+   ```
+
+   Within the next scan, Laptop B should show the HIGH-risk advisory popup. Dismiss it; it advises
+   the user but does not stop Notepad. On Laptop A, the filtered dashboard should show the Notepad
+   detection and its alert.
+
+8. After confirming the alert, click **Export Report** on the dashboard (Risk Summary) or open
+   **Reports → Risk Summary → Export** to download the CSV.
+
+9. Stop both scan loops with **Ctrl+C**. Remove the temporary Notepad blacklist rule if it should
+   not affect later scans. Revoke the two demo tokens when the test deployment is no longer used.
+
+**Hotspot note:** the server sees the hotspot's public/NAT source address, which may be identical
+for both laptops. Hostname is the per-laptop identity shown in SentinelProc; the IP is connection
+metadata, not proof of device identity.
+
 ---
 
 ## 4. Traps — read this before you click anything
@@ -200,19 +341,19 @@ php artisan tinker --execute="DB::table('processes')->where('monitoring_snapshot
 
 ---
 
-## 5. Seeds and expected numbers (as of the last verification)
+## 5. Seeds and expected numbers (verified 2026-09-25)
 
 Use these to sanity-check that the demo database is intact.
 
 | Table | Rows | Notes |
 |---|---|---|
 | `users` | 3 | admin / analyst / viewer |
-| `monitoring_snapshots` | 2 | dashboard reads the newest valid one |
-| `processes` | 550 | process rows across snapshots |
-| `alerts` | 96 | 2 high, 94 medium |
-| `activity_logs` | 550 | 442 detected, 105 first-seen, 3 risk-change |
+| `monitoring_snapshots` | 3 | dashboard reads the newest valid one |
+| `processes` | 823 | process rows across snapshots |
+| `alerts` | 101 | 2 high, 99 medium |
+| `activity_logs` | 823 | activity rows across snapshots |
 | `processes_seen` | 175 | 68 checked against VirusTotal, 1 flagged |
-| `system_audit_logs` | 56 | logins, exports, acknowledgements |
+| `system_audit_logs` | 68 | logins, exports, refreshes, acknowledgements |
 | `process_lists` / `process_rules` | 15 / 1 | allow/block lists |
 
 If a count is far off, the data was modified by a scan — not a bug.

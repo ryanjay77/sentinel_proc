@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS processes_seen (
 -- ---------------------------------------------------------------------
 -- monitoring_snapshots — one row per agent scan
 -- written by: insert_snapshot() -> (snapshot, snapshot_timestamp,
---             process_count, status)
+--             process_count, status, hostname)
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS monitoring_snapshots (
     id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -70,18 +70,20 @@ CREATE TABLE IF NOT EXISTS monitoring_snapshots (
     alerts             JSON            NULL,
     risk_score         JSON            NULL,
     status             VARCHAR(255)    NOT NULL DEFAULT 'normal',
+    hostname           VARCHAR(255)    NULL,
     created_at         TIMESTAMP       NULL DEFAULT NULL,
     updated_at         TIMESTAMP       NULL DEFAULT NULL,
     PRIMARY KEY (id),
     KEY monitoring_snapshots_snapshot_timestamp_index (snapshot_timestamp),
-    KEY monitoring_snapshots_status_index (status)
+    KEY monitoring_snapshots_status_index (status),
+    KEY monitoring_snapshots_hostname_index (hostname)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------
 -- processes — one row per process per scan
 -- written by: insert_process() -> (monitoring_snapshot_id, pid, name,
 --             path, cpu_percent, memory_mb, status, hash, first_seen,
---             risk_level, virus_total_data)
+--             risk_level, virus_total_data, hostname)
 -- `status` holds the OS username; risk_level is 'low'|'medium'|'high'
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS processes (
@@ -89,6 +91,7 @@ CREATE TABLE IF NOT EXISTS processes (
     monitoring_snapshot_id BIGINT UNSIGNED NOT NULL,
     pid                    INT             NOT NULL,
     name                   VARCHAR(255)    NOT NULL,
+    hostname               VARCHAR(255)    NULL,
     path                   VARCHAR(512)    NULL,
     cpu_percent            DECIMAL(5,2)    NULL,
     memory_mb              DECIMAL(10,2)   NULL,
@@ -102,6 +105,7 @@ CREATE TABLE IF NOT EXISTS processes (
     PRIMARY KEY (id),
     KEY processes_pid_index (pid),
     KEY processes_hash_index (hash),
+    KEY processes_hostname_index (hostname),
     CONSTRAINT processes_monitoring_snapshot_id_foreign
         FOREIGN KEY (monitoring_snapshot_id)
         REFERENCES monitoring_snapshots (id) ON DELETE CASCADE
@@ -109,7 +113,7 @@ CREATE TABLE IF NOT EXISTS processes (
 
 -- ---------------------------------------------------------------------
 -- alerts — one row per medium/high risk process
--- written by: insert_alert() -> (monitoring_snapshot_id, process_id,
+-- written by: insert_alert() -> (monitoring_snapshot_id, process_id, hostname,
 --             alert_type, severity, message, details, acknowledged)
 -- No foreign keys, matching migration 000008: monitoring_snapshot_id is
 -- a plain INT reference (it is not the bigint the other tables use) and
@@ -119,6 +123,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     id                     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     monitoring_snapshot_id INT             NOT NULL,
     process_id             BIGINT UNSIGNED NULL,
+    hostname               VARCHAR(255)    NULL,
     alert_type             VARCHAR(100)    NOT NULL,
     severity               VARCHAR(20)     NOT NULL,
     message                TEXT            NOT NULL,
@@ -129,6 +134,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     PRIMARY KEY (id),
     KEY alerts_monitoring_snapshot_id_index (monitoring_snapshot_id),
     KEY alerts_process_id_index (process_id),
+    KEY alerts_hostname_index (hostname),
     KEY alerts_alert_type_index (alert_type),
     KEY alerts_acknowledged_index (acknowledged)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

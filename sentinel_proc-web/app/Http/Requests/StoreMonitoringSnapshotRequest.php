@@ -26,12 +26,31 @@ class StoreMonitoringSnapshotRequest extends FormRequest
     {
         return [
             'snapshot' => 'required|json',
+            'scan_uuid' => ['nullable', 'uuid'],
+            'hostname' => ['nullable', 'string', 'max:255', 'regex:/^[A-Za-z0-9._-]+$/'],
             'snapshot_timestamp' => 'nullable|date_format:Y-m-d H:i:s',
             'process_count' => 'nullable|integer|min:0',
             'cpu_usage' => 'nullable|numeric|between:0,100',
             'memory_usage' => 'nullable|numeric|min:0',
             'disk_usage' => 'nullable|numeric|between:0,100',
             'status' => 'nullable|string|in:normal,warning,critical',
+
+            // API-mode agents send the authoritative scored process list at
+            // the top level; the snapshot JSON only carries a display summary.
+            'processes' => ['nullable', 'array', 'max:1000'],
+            'processes.*.pid' => ['nullable', 'integer', 'min:0'],
+            'processes.*.name' => ['nullable', 'string', 'max:255'],
+            'processes.*.path' => ['nullable', 'string', 'max:500'],
+            'processes.*.cpu_percent' => ['nullable', 'numeric', 'min:0'],
+            'processes.*.memory_mb' => ['nullable', 'numeric', 'min:0'],
+            'processes.*.status' => ['nullable', 'string', 'max:50'],
+            'processes.*.hash' => ['nullable', 'string', 'regex:/^[a-fA-F0-9]{64}$/'],
+            'processes.*.first_seen' => ['nullable', 'boolean'],
+            'processes.*.risk_level' => ['nullable', 'string', 'in:low,medium,high,critical'],
+            'processes.*.score' => ['nullable', 'integer', 'min:0', 'max:1000'],
+            'processes.*.reasons' => ['nullable', 'array', 'max:20'],
+            'processes.*.reasons.*' => ['nullable', 'string', 'max:100'],
+            'processes.*.virus_total_data' => ['nullable', 'array'],
         ];
     }
 
